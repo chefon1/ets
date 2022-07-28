@@ -3,52 +3,67 @@ Parameters:
   AllowedCallbacks:
     Type: List<String>
     Description: List of URLs that the application
+  # AuthDomainParam:
+  #   Type: String
+  #   Description: Cognito auth domain
 Resources:
 
-  # Server App Client | New
-  ServerAppClient:
-    Type: AWS::Cognito::UserPoolClient
-    Properties:
-      UserPoolId: !Ref CognitoUsers
-      ClientName: ServerClient
-      GenerateSecret: true
-      RefreshTokenValidity: 30
-      AllowedOAuthFlows:
-        - code
-        - implicit
-      ExplicitAuthFlows:
-        - ALLOW_USER_SRP_AUTH
-        - ALLOW_REFRESH_TOKEN_AUTH
-      CallbackURLs: !Ref AllowedCallbacks
-      AllowedOAuthScopes:
-        - email
-        - openid
-        - profile
-      AllowedOAuthFlowsUserPoolClient: true
-      PreventUserExistenceErrors: ENABLED
-      SupportedIdentityProviders:
-        - COGNITO
+  # # Server App Client | New
+  # ServerAppClient:
+  #   Type: AWS::Cognito::UserPoolClient
+  #   Properties:
+  #     UserPoolId: !Ref CognitoUsers
+  #     ClientName: ServerClient
+  #     GenerateSecret: true
+  #     RefreshTokenValidity: 30
+  #     AllowedOAuthFlows:
+  #       - client_credentials
+  #     ExplicitAuthFlows:
+  #       - ALLOW_USER_SRP_AUTH
+  #       - ALLOW_REFRESH_TOKEN_AUTH
+  #     CallbackURLs: !Ref AllowedCallbacks
+  #     AllowedOAuthScopes:
+  #       - email
+  #       - openid
+  #       - profile
+  #     AllowedOAuthFlowsUserPoolClient: true
+  #     PreventUserExistenceErrors: ENABLED
+  #     SupportedIdentityProviders:
+  #       - COGNITO
+
+  # AuthDomain:
+  #   Type: AWS::Cognito::UserPoolDomain
+  #   Properties:
+  #     UserPoolId: !Ref CognitoUsers
+  #     Domain: !Ref AuthDomainParam
 
   # Client App Client | New
   ClientAppClient:
     Type: AWS::Cognito::UserPoolClient
+    DependsOn:
+      - UserPoolResourceServer
     Properties:
       UserPoolId: !Ref CognitoUsers
       ClientName: ClientApp
-      GenerateSecret: false
       RefreshTokenValidity: 30
       AllowedOAuthFlows:
-        - code
-        - implicit
+        - client_credentials
+      GenerateSecret: true
       ExplicitAuthFlows:
         - ALLOW_USER_SRP_AUTH
         - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
       CallbackURLs: !Ref AllowedCallbacks
       AllowedOAuthScopes:
-        - email
-        - openid
-        - profile
-        - aws.cognito.signin.user.admin
+        - CognitoUsersResourceServer/messages.publish
+      #   - Fn::Join:
+      #     - "/"
+      #     - - Ref: CognitoUsers
+      #       - messages.publish
+      #   - email
+      #   - openid
+      #   - profile
+      #   - aws.cognito.signin.user.admin
       AllowedOAuthFlowsUserPoolClient: true
       PreventUserExistenceErrors: ENABLED
       SupportedIdentityProviders:
@@ -100,6 +115,17 @@ Resources:
           - ""
           - - Ref: AWS::StackName
             - "-api"
+
+  # Resource Server | New
+  UserPoolResourceServer: 
+    Type: AWS::Cognito::UserPoolResourceServer
+    Properties: 
+      UserPoolId: !Ref CognitoUsers 
+      Identifier: "CognitoUsersResourceServer"
+      Name: CognitoUsersResource
+      Scopes: 
+        - ScopeName: "messages.publish"
+          ScopeDescription: "Published Messages"
 
   # Role
   GatewayRole:
@@ -184,8 +210,6 @@ Resources:
       MethodResponses:
         - StatusCode: 200
       ResourceId: !Ref MessagesResource #attaching the GET method to the root resource of the API
-
-        # Fn::GetAtt: [ ApiGatewayRestApi , RootResourceId ]
         # Fn::GetAtt: [ ApiGatewayRestApi , RootResourceId ]
       RestApiId: !Ref ApiGatewayRestApi
 
@@ -205,8 +229,15 @@ Resources:
     DependsOn: #without the depends on, the deployment is sometimes done before
               #any operation is defined.
       - CognitoUsers
+      - UserPoolResourceServer
+      - ClientAppClient
       - CustomAuthorizer
       - ApiGatewayPostMethod
     Properties:
       RestApiId: !Ref ApiGatewayRestApi
       StageName: prod
+
+
+Outputs:
+  apiGatewayInvokeURL:
+    Value: !Sub https://${ApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/prod
