@@ -42,6 +42,7 @@ Resources:
       RestApiId: !Ref ApiGatewayRestApi
       Type: COGNITO_USER_POOLS
 
+
   # Cognito User Pool
   CognitoUsers:
     Type: AWS::Cognito::UserPool
