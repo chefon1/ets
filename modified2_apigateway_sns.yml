@@ -1,0 +1,247 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  AllowedCallbacks:
+    Type: List<String>
+    Description: List of URLs that the application
+Resources:
+
+  # Client App Client
+  ClientAppClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn:
+      - UserPoolResourceServer
+    Properties:
+      UserPoolId: !Ref CognitoUsers
+      ClientName: ClientApp
+      RefreshTokenValidity: 30
+      AllowedOAuthFlows:
+        - client_credentials
+      GenerateSecret: true
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+      CallbackURLs: !Ref AllowedCallbacks
+      AllowedOAuthScopes:
+        - CognitoUsersResourceServer/messages.publish
+      AllowedOAuthFlowsUserPoolClient: true
+      PreventUserExistenceErrors: ENABLED
+      SupportedIdentityProviders:
+        - COGNITO
+
+  # Custom Authorizer
+  CustomAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      IdentitySource: method.request.header.authorization
+      Name: CognitoAuthorizer
+      ProviderARNs:
+        - Fn::GetAtt:
+            - CognitoUsers
+            - Arn
+      RestApiId: !Ref ApiGatewayRestApi
+      Type: COGNITO_USER_POOLS
+
+  # Cognito User Pool
+  CognitoUsers:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: test-pool
+      UsernameConfiguration:
+        CaseSensitive: false
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireSymbols: true
+          RequireUppercase: true
+          TemporaryPasswordValidityDays: 1
+      UsernameAttributes:
+        - email
+      MfaConfiguration: "OFF"
+      Schema:
+        - AttributeDataType: String
+          DeveloperOnlyAttribute: false
+          Mutable: true
+          Name: email
+
+  # ApiGateway Account Configuration
+  ApiGatewayAccountConfig:
+    Type: "AWS::ApiGateway::Account"
+    Properties:
+      CloudWatchRoleArn: !GetAtt "ApiGatewayLoggingRole.Arn"
+
+  # ApiGateway Logging Role
+  ApiGatewayLoggingRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - "apigateway.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs"
+
+  # ApiGateway
+  ApiGatewayRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: 
+        Fn::Join:
+          - ""
+          - - Ref: AWS::StackName
+            - "-api"
+
+  # Resource Server | New
+  UserPoolResourceServer: 
+    Type: AWS::Cognito::UserPoolResourceServer
+    Properties: 
+      UserPoolId: !Ref CognitoUsers 
+      Identifier: "CognitoUsersResourceServer"
+      Name: CognitoUsersResource
+      Scopes: 
+        - ScopeName: "messages.publish"
+          ScopeDescription: "Published Messages"
+
+  # Role
+  GatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - apigateway.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: GatewayRolePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: "*" #grants access to all topics,
+                            #for production use, this should be more specific
+            - Effect: Allow #allow logging (not essential to the solution)
+              Action:
+                - logs:PutLogEvents
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+              Resource: "*"
+
+  # Request Validator | New
+  RequestValidator:
+    Type: AWS::ApiGateway::RequestValidator
+    Properties:
+      Name: TestRequestValidator
+      RestApiId: !Ref ApiGatewayRestApi
+      ValidateRequestBody: true
+      ValidateRequestParameters: true
+
+  # Message Resource | New
+  MessagesResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ParentId: !GetAtt
+        - ApiGatewayRestApi
+        - RootResourceId
+      PathPart: messages
+
+  # ApiGatewayPostMethod
+  ApiGatewayPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      ApiKeyRequired: false 
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CustomAuthorizer
+      HttpMethod: POST
+      RequestValidatorId: !Ref RequestValidator
+      RequestParameters: #request parameters need to be defined for the mapping
+        method.request.querystring.message: false #payload of the SNS message
+        method.request.querystring.phoneNumber: false #subject of the SNS message
+      Integration:
+        Type: AWS
+        Credentials:
+          Fn::GetAtt: [ GatewayRole, Arn ] #use the already defined role
+        Uri:  #required URI for using SNS service
+          Fn::Join:
+            - ""
+            - - "arn:aws:apigateway:"
+              - Ref: AWS::Region
+              - ":sns:action/Publish"
+        IntegrationHttpMethod: GET #SNS allows GET operations
+        RequestParameters: #parameter mapping defined by the AWS API.
+          integration.request.querystring.PhoneNumber: "method.request.querystring.phoneNumber"
+          integration.request.querystring.Message: "method.request.querystring.message"
+        IntegrationResponses: #map all responses to a default response.
+          - StatusCode: 200
+            ResponseTemplates: #default response
+              application/json: '{"status":"OK"}'
+      MethodResponses:
+        - StatusCode: 200
+      ResourceId: !Ref MessagesResource #attaching the GET method to the root resource of the API
+        # Fn::GetAtt: [ ApiGatewayRestApi , RootResourceId ]
+      RestApiId: !Ref ApiGatewayRestApi
+
+  # Empty Model | New
+  EmptyModel:
+    Type: AWS::ApiGateway::Model
+    Properties:
+      ContentType: application/json
+      Description: This is an empty model
+      Name: EmptyModel
+      RestApiId: !Ref ApiGatewayRestApi
+      Schema: '{}'
+
+  # CloudWatch Log
+  MyLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/apigateway/ApiGatewayRestApi
+      RetentionInDays: 30
+
+  # Stage
+  ProdStage:
+    Type: AWS::ApiGateway::Stage
+    DependsOn:
+      - MyLogGroup
+    Properties:
+      StageName: Prod
+      Description: Prod Stage
+      RestApiId: !Ref ApiGatewayRestApi
+      DeploymentId: !Ref ApiGatewayDeployment
+      AccessLogSetting:
+        DestinationArn: !GetAtt MyLogGroup.Arn
+        Format: '{ "requestId": "$context.requestId", "path": "$context.path", "routeKey": "$context.routeKey", "ip": "$context.identity.sourceIp", "requestTime": "$context.requestTime", "httpMethod": "$context.httpMethod","statusCode": $context.status }'
+
+  # Deployment
+  ApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: 
+      - CognitoUsers
+      - MyLogGroup
+      - UserPoolResourceServer
+      - ClientAppClient
+      - CustomAuthorizer
+      - ApiGatewayPostMethod
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      # StageName: !Ref ProdStage
+
+
+Outputs:
+  apiGatewayInvokeURL:
+    Value: !Sub https://${ApiGatewayRestApi}.execute-api.${AWS::Region}.amazonaws.com/prod
